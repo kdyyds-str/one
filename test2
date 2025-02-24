@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.17;
+
+contract BlindAuction {
+    struct Bid {
+        //定义结构体
+        bytes32 blindedBid;
+        uint deposit;
+    }
+    //受益人地址
+    address payable public beneficiary;
+    //竞标结束时间#示价结束时间#拍卖结束时间
+    uint public biddingEnd;
+    uint public revealEnd;
+    bool public ended;
+    //地址映射结构体（竞标人信息，押金）
+    mapping(address => Bid[]) public bids; 
+//定义变量保存最高价竞标人地址和最高价
+    address public highestBidder;
+    uint public highestBid;
+    //定义一个映射存押金方便退款
+    mapping(address => uint) pendingReturns;
+    //定义事件（获胜者，最高价者地址）
+    event AuctionEnded(address winner, uint highestBid);
+    //定义自定义异常
+    error TooEarly(uint time);
+    error TooLate(uint time);
+    error AuctionEndAlreadyCalled();
+    //定义修饰器：当前时间必须大于活动开始时间
+    modifier onlyBefore(uint time) {
+        if (block.timestamp >= time) revert TooLate(time);
+        _;        
+    }  
+    //当前时间必须小于等于活动结束时间
+    modifier onlyAfter(uint time) {
+        if (block.timestamp <= time) revert TooEarly(time);
+        _;          
+    }
+    //初始化：设定竞拍时间和示价时间同时将受益人的地址设置为可转账地址
+    constructor(
+        uint biddingTime,
+        uint revealTime,
+        address payable beneficiaryAddress
+    ) {
+        beneficiary = beneficiaryAddress;
+        biddingEnd = block.timestamp + biddingTime;
+        revealEnd = biddingEnd + revealTime;   
+    } 
+    //将用户输入存入映射中
+    function bid(bytes32 blindedBid) external payable onlyBefore(biddingEnd){
+        bids[msg.sender].push(Bid({
+            blindedBid: blindedBid,
+            deposit: msg.value
+        }));    
+    }        
+    //用于示价
+    function reveal(
+        uint[] calldata values,
+        bool[] calldata fakes,
+        bytes32[] calldata secrets
+    )
+        external
+        onlyAfter(biddingEnd)
+        onlyBefore(revealEnd)
+    {
+        uint length = bids[msg.sender].length; 
+        //判断输入的值是否正确
+        require(values.length == length);  
+        require(fakes.length == length);  
+        require(secrets.length == length); 
+        //遍历用户数值中的每个竞拍人账户
+        uint refund;         
+        for (uint i = 0; i < length; i++) {
+             Bid storage bidToCheck = bids[msg.sender][i];
+             
+             (uint value, bool fake, bytes32 secret) =
+                    (values[i], fakes[i], secrets[i]);       
+             if (bidToCheck.blindedBid != keccak256(abi.encodePacked(value, fake, secret))) {//验证信息的真实性
+               continue;        
+             }       
+            refund += bidToCheck.deposit;
+            if (!fake && bidToCheck.deposit >= value) {//如果信息真实并且竞拍价大于标价
+                if (placeBid(msg.sender, value))//调用placebid函数如果结果为真那么将竞标人地址和最高价加入到最高出价者数组中
+                    refund -= value;
+            }
+            bidToCheck.blindedBid = bytes32(0);//重置哈希
+        }    
+        payable(msg.sender).transfer(refund); //进行退款                                
+    }
+    //如果退款失败用户可以自行退款
+    function withdraw() external {
+        uint amount = pendingReturns[msg.sender];
+        if (amount > 0) {
+            pendingReturns[msg.sender] = 0;  
+            payable(msg.sender).transfer(amount);     
+        }        
+    } 
+    //拍卖结束
+    function auctionEnd() external onlyAfter(revealEnd){
+        if (ended) revert AuctionEndAlreadyCalled(); //如果拍卖已经结束则不能重复结束操作
+        emit AuctionEnded(highestBidder, highestBid); 
+        ended = true;   
+        beneficiary.transfer(highestBid);                    
+    }    
+    //判断当前竞拍人竞拍价是否大于当前最高价
+    function placeBid(address bidder, uint value) internal
+            returns (bool success){ 
+        if (value <= highestBid) {
+            return false;         
+        } 
+        if (highestBidder != address(0)) {
+            pendingReturns[highestBidder] += highestBid;   
+        }  
+        highestBid = value;
+        highestBidder = bidder; 
+        return true;                                          
+    }
+}
